@@ -130,11 +130,6 @@ export_recon_and_forward_results(fmdl, imdl, ...
 % y 可以是 1/2/3 或 'S1'/'S2'/'S3'
 prepare_svm_dataset(V_all, y_all, 'eit_3_2_dataset.mat');
 
-%跑一遍train_svm脚本
-
-prepare_cnn_dataset('E:\EIT_N\reconstruction1', ...
-                              'E:\EIT_N\eit_3_3_imds_splits.mat');
-
 train_cnn('E:\EIT_N\eit_3_3_imds_splits.mat', ...
                         'E:\EIT_N\cnn_eit_3_3.mat');
 
