@@ -1,0 +1,138 @@
+%% Step 1. 基础环境与8电极圆模型（修正版）
+run E:\eidors-v3.12-ng\eidors-v3.12-ng\eidors\startup.m;
+
+% 1. 建立圆形2D小腿横截面模型
+imdl0 = mk_common_model('c2c', 8);     % 只返回1个结构体
+fmdl  = imdl0.fwd_model;               % 取出前向模型
+
+% 2. 相邻激励-相邻测量模式，电流幅值0.01 A
+Iamp = 0.01;  % A
+stim = mk_stim_patterns(8, 1, '{ad}', '{ad}', {}, Iamp);
+fmdl.stimulation = stim;
+
+% 3. 背景导电率0.15 S/m
+img_bkg = mk_image(fmdl, 0.15);
+nElem   = size(fmdl.elems,1);
+
+% 4. 计算每个单元中心坐标与极坐标（供后续选区用）
+elem_xy = calc_element_centers(fmdl);                % [nElem × 2]
+[theta_rad, rho_abs] = cart2pol(elem_xy(:,1), elem_xy(:,2));
+rho_norm = rho_abs ./ max(rho_abs);                  % 归一化到[0,1]
+
+% 5. 快速检查测量通道数（应为40）
+data_test = fwd_solve(img_bkg);
+fprintf('测量通道数 = %d\n', numel(data_test.meas));
+
+% —— 局部函数：计算三角元中心 —— 
+function ctr = calc_element_centers(fmdl)
+  p = fmdl.nodes; e = fmdl.elems;
+  ctr = (p(e(:,1),:) + p(e(:,2),:) + p(e(:,3),:)) / 3;
+end
+
+%% 预览：应看到 S1=前外侧小亮点；S2=后侧两块；S3=前小+后大片(更淡)
+figure;
+for c = 1:3
+    ed  = generate_lactate_sigma(c, fmdl, theta_rad, rho_norm, 0.15);
+    img = mk_image(fmdl, ed);
+    subplot(1,3,c); show_fem(img); axis equal tight;
+    title(sprintf('S%d', c));
+end
+
+
+%% Step 3. 批量正问题求解，得到 V_all(样本数×40) 与标签 y_all
+rng(2025);
+n_per_class = 410;         % 论文设置：每类410组 → 共1230组
+sigma_bkg = 0.15;          % 背景
+sigma_lac = 0.7;           % 乳酸区
+V_all = []; y_all = []; GT_sigma = {};   % 可选保存真值场
+
+for c = 1:3
+  for k = 1:n_per_class
+    img = img_bkg;
+    % 用固定种子可重现；不传seed则每次随机
+    ed = generate_lactate_sigma(c, fmdl, theta_rad, rho_norm, sigma_bkg, k);
+    img.elem_data = ed;
+
+    data = fwd_solve(img);
+    v = data.meas(:).';           % 1×40
+    V_all = [V_all; v];
+    y_all = [y_all; c];
+    GT_sigma{end+1} = ed;
+  end
+end
+% V_all: 1230×40；y_all: 1230×1
+
+%% Step 4. TK-Noser 重建 + λ 交叉验证（EIDORS v3.12-ng & MATLAB R2024b）
+
+% 4.1 基准电压（差分重建基线）：背景0.15 S/m
+data_ref = fwd_solve(img_bkg);      % 结构体，含 .meas
+
+% 4.2 构建 inverse model（与前向模型一致）
+imdl = mk_common_model('c2c', 8);   % v3.12-ng 返回一个结构体
+imdl.fwd_model        = fmdl;
+imdl.reconst_type     = 'difference';
+imdl.solve            = @inv_solve_diff_GN_one_step;   % 牛顿一步差分
+imdl.RtR_prior        = @prior_noser;                  % TK-Noser先验
+imdl.hyperparameter.value = 0.1;                       % 初值，占位
+
+% 4.3 五折交叉验证（不依赖 Statistics Toolbox）
+N  = size(V_all,1);
+K  = 5;
+idx = randperm(N);
+fold_sizes = repmat(floor(N/K),1,K);
+fold_sizes(1:mod(N,K)) = fold_sizes(1:mod(N,K)) + 1;
+folds = mat2cell(idx, 1, fold_sizes);
+
+% 定义 λ 扫描范围
+lams = logspace(-3, 1, 10);   % 10^-3 ~ 10^1
+
+% 调用交叉验证函数
+[best_lambda, mse_vs_lam] = select_lambda_cv_dataresidual( ...
+    imdl, fmdl, data_ref, V_all, lams, 5);
+
+% 固定最优 λ
+imdl.hyperparameter.value = best_lambda;
+
+imdl.hyperparameter.value = best_lambda;
+fprintf('>>> 最优 λ = %.3g\n', best_lambda);
+
+% 4.5 用最优 λ 重建若干样本并可视化
+sel = randperm(N, 6);
+figure('Name', sprintf('Reconstruction (lambda=%.3g)', best_lambda));
+for i = 1:numel(sel)
+    n = sel(i);
+    data_meas      = data_ref;
+    data_meas.meas = V_all(n,:).';
+
+    img_rec = inv_solve(imdl, data_ref, data_meas);
+
+    subplot(2,3,i);
+    show_fem(img_rec); axis equal tight;
+    title(sprintf('#%d  S%d', n, y_all(n)));
+
+    % —— 可选：控制色轴，让S3后侧大片“更淡” —— 
+    % 数值上你已将S3后侧峰值设为~0.50；这里再把显示范围收窄一点：
+    clim_lo = sigma_bkg; 
+    clim_hi = 0.70;              % 背景到0.70之间显示（避免过饱和）
+    caxis([clim_lo, clim_hi]);   % 对当前子图生效
+end
+
+% 4.6 可视化 λ-曲线（了解选λ是否平稳）
+figure('Name','CV over lambda'); 
+semilogx(lams, mse_vs_lam, '-o'); grid on;
+xlabel('\lambda'); ylabel('CV-MSE (recon vs. truth)');
+title('Cross-Validation for \lambda (TK-Noser)');
+
+%% 导出重建图
+export_recon_and_forward_results(fmdl, imdl, ...
+    V_all, y_all, data_ref, sigma_bkg, GT_sigma, 'E:\EIT_0\reconstructions');
+
+% y 可以是 1/2/3 或 'S1'/'S2'/'S3'
+prepare_svm_dataset(V_all, y_all, 'eit_3_2_dataset.mat');
+
+train_cnn('E:\EIT_N\eit_3_3_imds_splits.mat', ...
+                        'E:\EIT_N\cnn_eit_3_3.mat');
+
+fusion('E:\EIT_N\cnn_eit_3_3.mat', ...
+                     'E:\EIT_N\eit_3_2_dataset.mat', ...
+                     'E:\EIT_N\fusion_result.mat');
