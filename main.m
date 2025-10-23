@@ -61,6 +61,31 @@ for c = 1:3
   end
 end
 % V_all: 1230×40；y_all: 1230×1
+%% Step 3.1 补充可视化 —— 三类平均电压幅值曲线 =====================
+fprintf('绘制三类平均电压幅值曲线...\n');
+
+% 计算每类平均电压（40通道）
+m1 = mean(V_all(y_all==1,:),1);
+m2 = mean(V_all(y_all==2,:),1);
+m3 = mean(V_all(y_all==3,:),1);
+
+% 绘制
+figure('Name','Mean Voltage Amplitude Curves','Position',[300 300 600 400]);
+plot(1:40, m1, '-or', 'LineWidth',1.5, 'MarkerSize',4); hold on;
+plot(1:40, m2, '-og', 'LineWidth',1.5, 'MarkerSize',4);
+plot(1:40, m3, '-ob', 'LineWidth',1.5, 'MarkerSize',4);
+xlabel('Channel Index (1–40)');
+ylabel('Voltage (V)');
+title('Average Voltage Amplitude Curves of S1–S3');
+legend({'S1','S2','S3'}, 'Location','best');
+grid on;
+set(gca,'FontName','Times New Roman','FontSize',11);
+
+% 对齐论文视觉风格（可选美化）
+ylim([min([m1 m2 m3])*0.95, max([m1 m2 m3])*1.05]);
+xticks(1:5:40);
+saveas(gcf, 'E:\EIT_0\Mean_Voltage_Amplitude_Curves.png');
+fprintf('✔ 已保存电压幅值曲线至 E:\\EIT_0\\Mean_Voltage_Amplitude_Curves.png\n');
 
 %% Step 4. TK-Noser 重建 + λ 交叉验证（EIDORS v3.12-ng & MATLAB R2024b）
 
@@ -84,7 +109,7 @@ fold_sizes(1:mod(N,K)) = fold_sizes(1:mod(N,K)) + 1;
 folds = mat2cell(idx, 1, fold_sizes);
 
 % 定义 λ 扫描范围
-lams = logspace(-3, 1, 10);   % 10^-3 ~ 10^1
+lams = logspace(-3, -1.2, 10);   % 10^-3 ~ 10^1
 
 % 调用交叉验证函数
 [best_lambda, mse_vs_lam] = select_lambda_cv_dataresidual( ...
@@ -107,7 +132,7 @@ for i = 1:numel(sel)
     img_rec = inv_solve(imdl, data_ref, data_meas);
 
     subplot(2,3,i);
-    show_fem(img_rec); axis equal tight;
+    show_slices(img_rec); axis equal tight;
     title(sprintf('#%d  S%d', n, y_all(n)));
 
     % —— 可选：控制色轴，让S3后侧大片“更淡” —— 
@@ -133,11 +158,19 @@ prepare_svm_dataset(V_all, y_all, 'eit_3_2_dataset.mat');
 %跑一遍train_svm脚本
 
 prepare_cnn_dataset('E:\EIT_N\reconstruction1', ...
-                              'E:\EIT_N\eit_3_3_imds_splits.mat');
+                              'E:\EIT_0\eit_3_3_imds_splits.mat');
 
 train_cnn('E:\EIT_N\eit_3_3_imds_splits.mat', ...
-                        'E:\EIT_N\cnn_eit_3_3.mat');
+                        'E:\EIT_0\cnn_eit_3_3.mat');
+    fusion( ...
+    'E:\EIT_0\eit_3_2_dataset.mat', ...
+    'E:\EIT_0\cnn_eit_3_3.mat', ...
+    'E:\EIT_0\eit_3_3_imds_splits.mat');
 
-fusion('E:\EIT_N\cnn_eit_3_3.mat', ...
-                     'E:\EIT_N\eit_3_2_dataset.mat', ...
-                     'E:\EIT_N\fusion_result.mat');
+    my_gradcam('E:\EIT_0\cnn_eit_3_3.mat', ...
+            'E:\EIT_0\eit_3_3_imds_splits.mat', ...
+            'E:\EIT_0\gradcam_results');
+
+    results_summary('E:\EIT_0\gradcam_results', ...
+                               'E:\EIT_0\cnn_eit_3_3.mat', ...
+                               'E:\EIT_0\eit_3_3_imds_splits.mat');
